@@ -21,13 +21,35 @@ struct RegexRule {
 
 static RULES: Lazy<Vec<RegexRule>> = Lazy::new(|| {
     vec![
-        RegexRule { name: "aws_access_key",  pat: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap() },
-        RegexRule { name: "github_token",    pat: Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}").unwrap() },
-        RegexRule { name: "bearer_token",    pat: Regex::new(r"(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}").unwrap() },
-        RegexRule { name: "jwt",             pat: Regex::new(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}").unwrap() },
-        RegexRule { name: "anthropic_key",   pat: Regex::new(r"sk-ant-[A-Za-z0-9\-_]{20,}").unwrap() },
-        RegexRule { name: "openai_key",      pat: Regex::new(r"sk-[A-Za-z0-9]{32,}").unwrap() },
-        RegexRule { name: "google_api_key",  pat: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap() },
+        RegexRule {
+            name: "aws_access_key",
+            pat: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+        },
+        RegexRule {
+            name: "github_token",
+            pat: Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}").unwrap(),
+        },
+        RegexRule {
+            name: "bearer_token",
+            pat: Regex::new(r"(?i)bearer\s+[A-Za-z0-9._\-+/=]{20,}").unwrap(),
+        },
+        RegexRule {
+            name: "jwt",
+            pat: Regex::new(r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
+                .unwrap(),
+        },
+        RegexRule {
+            name: "anthropic_key",
+            pat: Regex::new(r"sk-ant-[A-Za-z0-9\-_]{20,}").unwrap(),
+        },
+        RegexRule {
+            name: "openai_key",
+            pat: Regex::new(r"sk-[A-Za-z0-9]{32,}").unwrap(),
+        },
+        RegexRule {
+            name: "google_api_key",
+            pat: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
+        },
     ]
 });
 
@@ -39,7 +61,10 @@ pub fn redact_string(s: &mut String) -> Vec<Hit> {
         if rule.pat.is_match(s) {
             let replaced = rule.pat.replace_all(s, format!("«REDACTED:{}»", rule.name));
             *s = replaced.into_owned();
-            hits.push(Hit { rule: rule.name, field_path: String::new() });
+            hits.push(Hit {
+                rule: rule.name,
+                field_path: String::new(),
+            });
         }
     }
     // Entropy scan after regex so we don't double-redact our own marker.
@@ -47,7 +72,10 @@ pub fn redact_string(s: &mut String) -> Vec<Hit> {
         let stripped = strip_high_entropy(s);
         if stripped != *s {
             *s = stripped;
-            hits.push(Hit { rule, field_path: String::new() });
+            hits.push(Hit {
+                rule,
+                field_path: String::new(),
+            });
         }
     }
     hits
@@ -80,7 +108,11 @@ fn redact_value_inner(v: &mut Value, path: &str, hits: &mut Vec<Hit>) {
         }
         Value::Object(map) => {
             for (k, item) in map.iter_mut() {
-                let child = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
                 redact_value_inner(item, &child, hits);
             }
         }
@@ -106,7 +138,9 @@ fn shannon_entropy(s: &str) -> f64 {
     }
     let mut h = 0.0;
     for c in counts.iter() {
-        if *c == 0 { continue; }
+        if *c == 0 {
+            continue;
+        }
         let p = *c as f64 / total as f64;
         h -= p * p.log2();
     }
@@ -115,19 +149,44 @@ fn shannon_entropy(s: &str) -> f64 {
 
 fn is_delim(b: u8) -> bool {
     // ASCII-only set; byte positions of delimiters are always char boundaries.
-    b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b',' | b';' | b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'<' | b'>' | b'`')
+    b.is_ascii_whitespace()
+        || matches!(
+            b,
+            b'"' | b'\''
+                | b','
+                | b';'
+                | b'('
+                | b')'
+                | b'{'
+                | b'}'
+                | b'['
+                | b']'
+                | b'<'
+                | b'>'
+                | b'`'
+        )
 }
 
 fn token_is_secret_shaped(tok: &str) -> bool {
     // Cheap filters to avoid false positives on natural text.
-    if tok.len() < MIN_LEN { return false; }
-    if !tok.is_ascii() { return false; }                 // Chinese, accented Latin, etc. → not a secret token.
-    if looks_like_path(tok) { return false; }
-    if tok.contains('.') && tok.split('.').count() > 3 { return false; } // probably a filename or version.
-    // Require a mix of letters + digits to look opaque.
+    if tok.len() < MIN_LEN {
+        return false;
+    }
+    if !tok.is_ascii() {
+        return false;
+    } // Chinese, accented Latin, etc. → not a secret token.
+    if looks_like_path(tok) {
+        return false;
+    }
+    if tok.contains('.') && tok.split('.').count() > 3 {
+        return false;
+    } // probably a filename or version.
+      // Require a mix of letters + digits to look opaque.
     let has_alpha = tok.bytes().any(|b| b.is_ascii_alphabetic());
     let has_digit = tok.bytes().any(|b| b.is_ascii_digit());
-    if !(has_alpha && has_digit) { return false; }
+    if !(has_alpha && has_digit) {
+        return false;
+    }
     shannon_entropy(tok) >= MIN_BITS
 }
 
@@ -144,7 +203,9 @@ fn scan_entropy(s: &str) -> Option<&'static str> {
             continue;
         }
         let start = i;
-        while i < bytes.len() && !is_delim(bytes[i]) { i += 1; }
+        while i < bytes.len() && !is_delim(bytes[i]) {
+            i += 1;
+        }
         if token_is_secret_shaped(&s[start..i]) {
             return Some("high_entropy");
         }
@@ -164,7 +225,9 @@ fn strip_high_entropy(s: &str) -> String {
             continue;
         }
         let start = i;
-        while i < bytes.len() && !is_delim(bytes[i]) { i += 1; }
+        while i < bytes.len() && !is_delim(bytes[i]) {
+            i += 1;
+        }
         // start and i are both at delimiter byte positions (or 0/len) which
         // are guaranteed char boundaries because delimiters are ASCII.
         let tok = &s[start..i];

@@ -10,7 +10,9 @@ use store::Store;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 
 use crate::denormalise::{project, ArtifactRef, ToolProjection};
-use crate::parser::{parse_ts_to_ms, sha256_hex, text_and_thinking_chars, tool_results, tool_uses, ParsedLine};
+use crate::parser::{
+    parse_ts_to_ms, sha256_hex, text_and_thinking_chars, tool_results, tool_uses, ParsedLine,
+};
 use crate::redact::redact_value;
 
 const SCHEMA_VERSION: i32 = 1;
@@ -133,7 +135,15 @@ async fn ingest_one(store: &Store, path: &Path, stats: &mut IngestStats) -> anyh
             upsert_session(store, &parsed, &session_id, &full_hash).await?;
         }
 
-        write_event(store, &parsed, &session_id, &path_str, line_offset, &full_hash).await?;
+        write_event(
+            store,
+            &parsed,
+            &session_id,
+            &path_str,
+            line_offset,
+            &full_hash,
+        )
+        .await?;
         events_in_file += 1;
         stats.events_added += 1;
 
@@ -186,13 +196,20 @@ async fn file_sha256(file: &mut tokio::fs::File) -> anyhow::Result<String> {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = file.read(&mut buf).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         h.update(&buf[..n]);
     }
     Ok(hex::encode(h.finalize()))
 }
 
-async fn upsert_session(store: &Store, p: &ParsedLine, session_id: &str, file_sha: &str) -> anyhow::Result<()> {
+async fn upsert_session(
+    store: &Store,
+    p: &ParsedLine,
+    session_id: &str,
+    file_sha: &str,
+) -> anyhow::Result<()> {
     let t = &p.transcript;
     let model = t.message.as_ref().and_then(|m| m.model.clone());
     sqlx::query(
@@ -261,12 +278,14 @@ async fn write_event(
     .await?;
 
     for h in &hits {
-        sqlx::query("INSERT OR IGNORE INTO redactions(event_uuid, field_path, rule) VALUES (?1, ?2, ?3)")
-            .bind(&uuid)
-            .bind(&h.field_path)
-            .bind(h.rule)
-            .execute(&store.writer)
-            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO redactions(event_uuid, field_path, rule) VALUES (?1, ?2, ?3)",
+        )
+        .bind(&uuid)
+        .bind(&h.field_path)
+        .bind(h.rule)
+        .execute(&store.writer)
+        .await?;
     }
     Ok(())
 }
@@ -280,8 +299,12 @@ fn synthetic_uuid(path: &str, offset: u64) -> String {
 }
 
 async fn write_message_row(store: &Store, p: &ParsedLine, session_id: &str) -> anyhow::Result<()> {
-    let Some(uuid) = p.transcript.uuid.as_deref() else { return Ok(()); };
-    let Some(msg) = p.transcript.message.as_ref() else { return Ok(()); };
+    let Some(uuid) = p.transcript.uuid.as_deref() else {
+        return Ok(());
+    };
+    let Some(msg) = p.transcript.message.as_ref() else {
+        return Ok(());
+    };
     let role = msg.role.as_deref().unwrap_or(p.kind_str()).to_string();
     let (text_chars, thinking_chars) = text_and_thinking_chars(p);
     let content_hash = match &msg.content {
@@ -313,7 +336,9 @@ async fn write_message_row(store: &Store, p: &ParsedLine, session_id: &str) -> a
 }
 
 async fn write_tool_calls(store: &Store, p: &ParsedLine, session_id: &str) -> anyhow::Result<i64> {
-    let Some(uuid) = p.transcript.uuid.as_deref() else { return Ok(0); };
+    let Some(uuid) = p.transcript.uuid.as_deref() else {
+        return Ok(0);
+    };
     let is_sidechain = p.transcript.is_sidechain.unwrap_or(false) as i32;
     let agent_id = p.transcript.agent_id.as_deref();
 
@@ -447,20 +472,17 @@ async fn upsert_artifact(store: &Store, a: &ArtifactRef, ts_ms: i64) -> anyhow::
 
 async fn write_tool_results(store: &Store, p: &ParsedLine) -> anyhow::Result<()> {
     for (tool_use_id, is_error, content) in tool_results(p) {
-        let tc_id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM tool_calls WHERE tool_use_id = ?1",
-        )
-        .bind(&tool_use_id)
-        .fetch_optional(&store.reader)
-        .await?;
+        let tc_id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM tool_calls WHERE tool_use_id = ?1")
+                .bind(&tool_use_id)
+                .fetch_optional(&store.reader)
+                .await?;
         let Some(tc_id) = tc_id else { continue };
 
-        let started_at: Option<i64> = sqlx::query_scalar(
-            "SELECT ts FROM tool_calls WHERE id = ?1",
-        )
-        .bind(tc_id)
-        .fetch_optional(&store.reader)
-        .await?;
+        let started_at: Option<i64> = sqlx::query_scalar("SELECT ts FROM tool_calls WHERE id = ?1")
+            .bind(tc_id)
+            .fetch_optional(&store.reader)
+            .await?;
         let duration_ms = started_at.map(|s| p.ts_ms - s);
 
         let output_bytes = content
@@ -491,7 +513,11 @@ async fn write_tool_results(store: &Store, p: &ParsedLine) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn accumulate_session_tokens(store: &Store, p: &ParsedLine, session_id: &str) -> anyhow::Result<()> {
+async fn accumulate_session_tokens(
+    store: &Store,
+    p: &ParsedLine,
+    session_id: &str,
+) -> anyhow::Result<()> {
     let Some(u) = p.usage() else { return Ok(()) };
     sqlx::query(
         "UPDATE sessions SET

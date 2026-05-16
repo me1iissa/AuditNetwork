@@ -1,0 +1,66 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target host (must match a *_HOST secret)"
+        type: choice
+        required: true
+        default: hetzner
+        options: [hetzner, ovh, scaleway]
+      image_tag:
+        description: "Image tag to deploy from ghcr.io/<owner>/auditnetwork"
+        type: string
+        required: true
+        default: latest
+
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    steps:
+      - name: Configure SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "StrictHostKeyChecking=accept-new" >> ~/.ssh/config
+
+      - name: Pick host
+        id: pick
+        env:
+          HETZNER_HOST:  ${{ secrets.HETZNER_HOST }}
+          OVH_HOST:      ${{ secrets.OVH_HOST }}
+          SCALEWAY_HOST: ${{ secrets.SCALEWAY_HOST }}
+        run: |
+          case "${{ inputs.target }}" in
+            hetzner)  echo "host=$HETZNER_HOST"  >> "$GITHUB_OUTPUT" ;;
+            ovh)      echo "host=$OVH_HOST"      >> "$GITHUB_OUTPUT" ;;
+            scaleway) echo "host=$SCALEWAY_HOST" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Deploy via SSH
+        env:
+          HOST: ${{ steps.pick.outputs.host }}
+          TAG:  ${{ inputs.image_tag }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/auditnetwork
+        run: |
+          ssh "deploy@$HOST" "
+            set -euo pipefail
+            sudo sed -i 's#image: .*#image: ${IMAGE}:${TAG}#' /etc/auditnetwork/docker-compose.yml
+            sudo systemctl restart auditnetwork
+            for i in \$(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+                echo healthy; exit 0
+              fi
+              sleep 2
+            done
+            echo healthcheck failed; exit 1
+          "

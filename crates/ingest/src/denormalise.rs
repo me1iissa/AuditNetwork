@@ -83,8 +83,12 @@ pub fn project(tool_name: &str, input: &Value) -> ToolProjection {
 }
 
 fn project_file(input: &Value, op: &'static str) -> ToolProjection {
-    let path = input.get("file_path").or_else(|| input.get("notebook_path"))
-        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let path = input
+        .get("file_path")
+        .or_else(|| input.get("notebook_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if path.is_empty() {
         return ToolProjection::default();
     }
@@ -102,14 +106,21 @@ fn project_file(input: &Value, op: &'static str) -> ToolProjection {
             display: path.clone(),
             access_kind,
         }],
-        file_op: Some(FileOp { file_path: path, op }),
+        file_op: Some(FileOp {
+            file_path: path,
+            op,
+        }),
         bash: None,
         web: None,
     }
 }
 
 fn project_glob(input: &Value) -> ToolProjection {
-    let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let pattern = input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if pattern.is_empty() {
         return ToolProjection::default();
     }
@@ -125,8 +136,15 @@ fn project_glob(input: &Value) -> ToolProjection {
 }
 
 fn project_grep(input: &Value) -> ToolProjection {
-    let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let path = input.get("path").and_then(|v| v.as_str()).map(str::to_owned);
+    let pattern = input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     let mut artifacts = Vec::new();
     if !pattern.is_empty() {
         artifacts.push(ArtifactRef {
@@ -146,11 +164,18 @@ fn project_grep(input: &Value) -> ToolProjection {
             });
         }
     }
-    ToolProjection { artifacts, ..Default::default() }
+    ToolProjection {
+        artifacts,
+        ..Default::default()
+    }
 }
 
 fn project_bash(input: &Value) -> ToolProjection {
-    let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let command = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if command.is_empty() {
         return ToolProjection::default();
     }
@@ -171,19 +196,36 @@ fn project_bash(input: &Value) -> ToolProjection {
             display: command.clone(),
             access_kind: "exec",
         }],
-        bash: Some(BashFacts { command, argv0, command_hash }),
+        bash: Some(BashFacts {
+            command,
+            argv0,
+            command_hash,
+        }),
         ..Default::default()
     }
 }
 
 fn project_web(input: &Value) -> ToolProjection {
-    let raw_url = input.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let raw_query = input.get("query").and_then(|v| v.as_str()).map(str::to_owned);
+    let raw_url = input
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let raw_query = input
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
 
     if !raw_url.is_empty() {
         let parsed = Url::parse(&raw_url).ok();
-        let host = parsed.as_ref().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
-        let path = parsed.as_ref().map(|u| u.path().to_string()).unwrap_or_default();
+        let host = parsed
+            .as_ref()
+            .and_then(|u| u.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        let path = parsed
+            .as_ref()
+            .map(|u| u.path().to_string())
+            .unwrap_or_default();
         let mut h = Sha256::new();
         h.update(raw_url.as_bytes());
         let url_hash = hex::encode(h.finalize());
@@ -194,7 +236,12 @@ fn project_web(input: &Value) -> ToolProjection {
                 display: raw_url.clone(),
                 access_kind: "fetch",
             }],
-            web: Some(WebFacts { url: raw_url, host, path, url_hash }),
+            web: Some(WebFacts {
+                url: raw_url,
+                host,
+                path,
+                url_hash,
+            }),
             ..Default::default()
         }
     } else if let Some(q) = raw_query {
@@ -213,7 +260,11 @@ fn project_web(input: &Value) -> ToolProjection {
 }
 
 fn project_agent(input: &Value) -> ToolProjection {
-    let subagent_type = input.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("general-purpose").to_string();
+    let subagent_type = input
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("general-purpose")
+        .to_string();
     ToolProjection {
         artifacts: vec![ArtifactRef {
             kind: ArtifactKind::Agent,

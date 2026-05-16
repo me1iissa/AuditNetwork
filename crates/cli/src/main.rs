@@ -1,15 +1,22 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
+use axum::{routing::get, Json, Router};
 use clap::{Parser, Subcommand};
 use store::Store;
 
 #[derive(Parser, Debug)]
-#[command(name = "auditnetwork", version, about = "Audit and visualise Claude Code tool-call activity")]
+#[command(
+    name = "auditnetwork",
+    version,
+    about = "Audit and visualise Claude Code tool-call activity"
+)]
 struct Cli {
     /// Path to the SQLite warehouse. Defaults to
     /// $XDG_DATA_HOME/auditnetwork/audit.db or ~/.local/share/auditnetwork/audit.db.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "AN_DB")]
     db: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -28,11 +35,15 @@ enum Cmd {
         auto: bool,
     },
     /// Run a read-only SQL query against the warehouse and print rows as JSON.
-    Query {
-        sql: String,
-    },
+    Query { sql: String },
     /// Show top-level counts.
     Stats,
+    /// Serve the HTTP API + (eventually) the SPA. Binds to 127.0.0.1 by default.
+    /// Set AN_BIND=0.0.0.0:8080 to expose externally.
+    Serve {
+        #[arg(long, env = "AN_BIND", default_value = "127.0.0.1:8080")]
+        bind: SocketAddr,
+    },
 }
 
 #[tokio::main]
@@ -74,8 +85,68 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Stats => {
             print_stats(&store).await?;
         }
+        Cmd::Serve { bind } => {
+            serve(store, bind).await?;
+        }
     }
     Ok(())
+}
+
+struct AppState {
+    store: Store,
+}
+
+async fn serve(store: Store, bind: SocketAddr) -> anyhow::Result<()> {
+    let state = Arc::new(AppState { store });
+    let app = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .with_state(state.clone());
+
+    tracing::info!("listening on {bind}");
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn healthz() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+async fn readyz(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let n: i64 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&state.store.reader)
+        .await
+        .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(Json(serde_json::json!({ "ok": n == 1 })))
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown requested");
 }
 
 fn default_db_path() -> PathBuf {
@@ -117,30 +188,41 @@ fn decode_cell(row: &sqlx::sqlite::SqliteRow, idx: usize) -> serde_json::Value {
     }
     let ty = v.type_info();
     match ty.name() {
-        "INTEGER" | "INT" | "INT8" | "BIGINT" => row.try_get::<i64, _>(idx).map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
-        "REAL" | "FLOAT" | "DOUBLE" => row.try_get::<f64, _>(idx).map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
-        "BLOB" => row.try_get::<Vec<u8>, _>(idx).map(|b| serde_json::Value::String(hex::encode(b))).unwrap_or(serde_json::Value::Null),
-        _ => row.try_get::<String, _>(idx).map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+        "INTEGER" | "INT" | "INT8" | "BIGINT" => row
+            .try_get::<i64, _>(idx)
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+        "REAL" | "FLOAT" | "DOUBLE" => row
+            .try_get::<f64, _>(idx)
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+        "BLOB" => row
+            .try_get::<Vec<u8>, _>(idx)
+            .map(|b| serde_json::Value::String(hex::encode(b)))
+            .unwrap_or(serde_json::Value::Null),
+        _ => row
+            .try_get::<String, _>(idx)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
 async fn print_stats(store: &Store) -> anyhow::Result<()> {
     for (label, q) in [
-        ("sessions",        "SELECT COUNT(*) FROM sessions"),
-        ("events",          "SELECT COUNT(*) FROM events"),
-        ("messages",        "SELECT COUNT(*) FROM messages"),
-        ("tool_calls",      "SELECT COUNT(*) FROM tool_calls"),
-        ("tool_results",    "SELECT COUNT(*) FROM tool_results"),
-        ("artifacts",       "SELECT COUNT(*) FROM artifacts"),
-        ("edges",           "SELECT COUNT(*) FROM tool_artifact_edges"),
-        ("file_ops",        "SELECT COUNT(*) FROM file_ops"),
-        ("bash_commands",   "SELECT COUNT(*) FROM bash_commands"),
-        ("web_fetches",     "SELECT COUNT(*) FROM web_fetches"),
-        ("redactions",      "SELECT COUNT(*) FROM redactions"),
+        ("sessions", "SELECT COUNT(*) FROM sessions"),
+        ("events", "SELECT COUNT(*) FROM events"),
+        ("messages", "SELECT COUNT(*) FROM messages"),
+        ("tool_calls", "SELECT COUNT(*) FROM tool_calls"),
+        ("tool_results", "SELECT COUNT(*) FROM tool_results"),
+        ("artifacts", "SELECT COUNT(*) FROM artifacts"),
+        ("edges", "SELECT COUNT(*) FROM tool_artifact_edges"),
+        ("file_ops", "SELECT COUNT(*) FROM file_ops"),
+        ("bash_commands", "SELECT COUNT(*) FROM bash_commands"),
+        ("web_fetches", "SELECT COUNT(*) FROM web_fetches"),
+        ("redactions", "SELECT COUNT(*) FROM redactions"),
     ] {
         let n: i64 = sqlx::query_scalar(q).fetch_one(&store.reader).await?;
         println!("{label:>14}: {n}");
     }
     Ok(())
 }
-

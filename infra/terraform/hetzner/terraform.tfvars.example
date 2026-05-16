@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. Do NOT commit terraform.tfvars.
+# hcloud_token is also accepted via env: export HCLOUD_TOKEN=...
+
+domain              = "audit.example.com"
+ssh_authorized_keys = [
+  # paste your ssh public key(s), one per line:
+  # "ssh-ed25519 AAAA... user@host",
+]
+# server_type = "cax11"      # default; cx22 for x86
+# location    = "fsn1"       # fsn1 / nbg1 / hel1 / ash / hil / sin

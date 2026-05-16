@@ -51,7 +51,9 @@ impl Store {
         // Idempotent — every CREATE uses IF NOT EXISTS.
         sqlx::raw_sql(SCHEMA_SQL).execute(&self.writer).await?;
         // Pin schema version after migration.
-        sqlx::query("PRAGMA user_version = 1").execute(&self.writer).await?;
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(&self.writer)
+            .await?;
         Ok(())
     }
 

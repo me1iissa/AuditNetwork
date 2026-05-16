@@ -17,14 +17,22 @@ pub struct Transcript {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uuid: Option<String>,
-    #[serde(default, rename = "parentUuid", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "parentUuid",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub parent_uuid: Option<String>,
     #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 
-    #[serde(default, rename = "isSidechain", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "isSidechain",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub is_sidechain: Option<bool>,
     #[serde(default, rename = "agentId", skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -45,7 +53,11 @@ pub struct Transcript {
     pub entrypoint: Option<String>,
     #[serde(default, rename = "userType", skip_serializing_if = "Option::is_none")]
     pub user_type: Option<String>,
-    #[serde(default, rename = "permissionMode", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "permissionMode",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub permission_mode: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,8 +150,14 @@ pub struct Usage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Thinking { thinking: String, #[serde(default)] signature: Option<String> },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,

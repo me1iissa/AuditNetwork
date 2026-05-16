@@ -18,5 +18,7 @@ sqlx.workspace = true
 serde_json.workspace = true
 dirs.workspace = true
 hex.workspace = true
+axum.workspace = true
+tower-http.workspace = true
 ingest.workspace = true
 store.workspace = true

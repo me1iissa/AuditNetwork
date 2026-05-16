@@ -52,7 +52,10 @@ impl ParsedLine {
     }
 
     pub fn usage(&self) -> Option<&Usage> {
-        self.transcript.message.as_ref().and_then(|m| m.usage.as_ref())
+        self.transcript
+            .message
+            .as_ref()
+            .and_then(|m| m.usage.as_ref())
     }
 }
 
@@ -89,7 +92,9 @@ pub fn tool_uses(line: &ParsedLine) -> Vec<(String, String, Value)> {
     line.blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => Some((id.clone(), name.clone(), input.clone())),
+            ContentBlock::ToolUse { id, name, input } => {
+                Some((id.clone(), name.clone(), input.clone()))
+            }
             _ => None,
         })
         .collect()
@@ -99,9 +104,11 @@ pub fn tool_results(line: &ParsedLine) -> Vec<(String, Option<bool>, Option<Valu
     line.blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                Some((tool_use_id.clone(), *is_error, content.clone()))
-            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Some((tool_use_id.clone(), *is_error, content.clone())),
             _ => None,
         })
         .collect()

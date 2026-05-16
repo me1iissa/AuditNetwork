@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. Do NOT commit terraform.tfvars.
+
+domain              = "audit.example.com"
+ssh_authorized_keys = [
+  # "ssh-ed25519 AAAA... user@host",
+]
+# zone          = "fr-par-1"        # fr-par-{1,2,3} / nl-ams-{1,2,3} / pl-waw-{1,2}
+# instance_type = "PLAY2-NANO"      # PLAY2-NANO / PLAY2-MICRO / COPARM1-2C-8G
