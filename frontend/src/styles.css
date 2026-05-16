@@ -1,0 +1,111 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --panel: #161b22;
+  --border: #21262d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px 0;
+}
+.sidebar h1 {
+  font-size: 14px;
+  margin: 4px 14px 14px;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.session-list li {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.session-list li:hover { background: #1b2129; }
+.session-list li.selected { background: #1f2937; }
+.session-list .title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-list .meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 6px;
+}
+
+.canvas-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.canvas-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.mode-toggle button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.mode-toggle button.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+}
+.mode-toggle button:first-child { border-right: none; }
+.stats {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.cy {
+  flex: 1;
+  background: #0a0d12;
+}
+
+.error {
+  padding: 8px 12px;
+  background: #3a1818;
+  color: #ff8a80;
+  border-bottom: 1px solid #5a2020;
+  font-size: 12px;
+}

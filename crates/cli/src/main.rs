@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context;
-use axum::{routing::get, Json, Router};
 use clap::{Parser, Subcommand};
 use store::Store;
 
@@ -43,6 +41,10 @@ enum Cmd {
     Serve {
         #[arg(long, env = "AN_BIND", default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+        /// Enable permissive CORS for the Vite dev server. **Never** combine
+        /// with a public bind — see crates/api/src/lib.rs::router.
+        #[arg(long, env = "AN_DEV_CORS")]
+        dev_cors: bool,
     },
 }
 
@@ -85,47 +87,21 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Stats => {
             print_stats(&store).await?;
         }
-        Cmd::Serve { bind } => {
-            serve(store, bind).await?;
+        Cmd::Serve { bind, dev_cors } => {
+            serve(store, bind, dev_cors).await?;
         }
     }
     Ok(())
 }
 
-struct AppState {
-    store: Store,
-}
-
-async fn serve(store: Store, bind: SocketAddr) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { store });
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .with_state(state.clone());
-
-    tracing::info!("listening on {bind}");
+async fn serve(store: Store, bind: SocketAddr, dev_cors: bool) -> anyhow::Result<()> {
+    let app = api::router(store, dev_cors);
+    tracing::info!("listening on {bind} (dev_cors={dev_cors})");
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-async fn healthz() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
-}
-
-async fn readyz(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let n: i64 = sqlx::query_scalar("SELECT 1")
-        .fetch_one(&state.store.reader)
-        .await
-        .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(Json(serde_json::json!({ "ok": n == 1 })))
 }
 
 async fn shutdown_signal() {
