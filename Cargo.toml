@@ -4,6 +4,7 @@ members = [
     "crates/model",
     "crates/ingest",
     "crates/store",
+    "crates/api",
     "crates/cli",
 ]
 
@@ -37,6 +38,7 @@ dirs = "5"
 model = { path = "crates/model" }
 ingest = { path = "crates/ingest" }
 store = { path = "crates/store" }
+api = { path = "crates/api" }
 
 [profile.release]
 opt-level = 3

@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context;
-use axum::{routing::get, Json, Router};
 use clap::{Parser, Subcommand};
 use store::Store;
 
@@ -92,40 +90,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-struct AppState {
-    store: Store,
-}
-
 async fn serve(store: Store, bind: SocketAddr) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { store });
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .with_state(state.clone());
-
+    let app = api::router(store);
     tracing::info!("listening on {bind}");
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-async fn healthz() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "ok": true,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
-}
-
-async fn readyz(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let n: i64 = sqlx::query_scalar("SELECT 1")
-        .fetch_one(&state.store.reader)
-        .await
-        .map_err(|_| axum::http::StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(Json(serde_json::json!({ "ok": n == 1 })))
 }
 
 async fn shutdown_signal() {
