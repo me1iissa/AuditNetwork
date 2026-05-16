@@ -41,6 +41,10 @@ enum Cmd {
     Serve {
         #[arg(long, env = "AN_BIND", default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+        /// Enable permissive CORS for the Vite dev server. **Never** combine
+        /// with a public bind — see crates/api/src/lib.rs::router.
+        #[arg(long, env = "AN_DEV_CORS")]
+        dev_cors: bool,
     },
 }
 
@@ -83,16 +87,16 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Stats => {
             print_stats(&store).await?;
         }
-        Cmd::Serve { bind } => {
-            serve(store, bind).await?;
+        Cmd::Serve { bind, dev_cors } => {
+            serve(store, bind, dev_cors).await?;
         }
     }
     Ok(())
 }
 
-async fn serve(store: Store, bind: SocketAddr) -> anyhow::Result<()> {
-    let app = api::router(store);
-    tracing::info!("listening on {bind}");
+async fn serve(store: Store, bind: SocketAddr, dev_cors: bool) -> anyhow::Result<()> {
+    let app = api::router(store, dev_cors);
+    tracing::info!("listening on {bind} (dev_cors={dev_cors})");
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

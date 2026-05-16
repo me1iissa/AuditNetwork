@@ -24,17 +24,29 @@ pub struct AppState {
     pub store: Store,
 }
 
-pub fn router(store: Store) -> Router {
+/// Build the application router.
+///
+/// `dev_cors` opts into `CorsLayer::very_permissive()`, which lets the
+/// Vite dev server at `:5173` call the Rust backend at `:8080` without
+/// auth. **Do not enable this on a public bind** — combined with
+/// `AN_BIND=0.0.0.0:8080` it would let any origin read all session
+/// metadata. In production (M6) the SPA is served from the same origin
+/// as the API via `rust-embed`, so no CORS layer is needed.
+pub fn router(store: Store, dev_cors: bool) -> Router {
     let state = Arc::new(AppState { store });
-    Router::new()
+    let base = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))
         .route("/api/sessions", get(sessions::list))
         .route("/api/sessions/:id", get(sessions::detail))
-        .route("/api/sessions/:id/graph", get(graph::session_graph))
-        // Liberal CORS in dev so the Vite dev server at :5173 can hit the
-        // backend at :8080. Production builds will serve the SPA from the
-        // same origin via rust-embed and won't need this layer.
-        .layer(CorsLayer::very_permissive())
-        .with_state(state)
+        .route("/api/sessions/:id/graph", get(graph::session_graph));
+    let r = if dev_cors {
+        tracing::warn!(
+            "permissive CORS enabled — only safe behind 127.0.0.1 or a trusted reverse proxy"
+        );
+        base.layer(CorsLayer::very_permissive())
+    } else {
+        base
+    };
+    r.with_state(state)
 }

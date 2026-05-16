@@ -21,15 +21,18 @@ export function Sidebar() {
   const selected = useUi((s) => s.selectedSessionId);
   const setSession = useUi((s) => s.setSession);
 
+  // Fetch sessions once on mount. Auto-selection is a separate effect so
+  // clicking a session doesn't trigger a refetch.
   useEffect(() => {
     api
       .listSessions()
-      .then((rows) => {
-        setSessions(rows);
-        if (rows.length && !selected) setSession(rows[0].id);
-      })
+      .then(setSessions)
       .catch((e) => setError(String(e)));
-  }, [selected, setSession]);
+  }, []);
+
+  useEffect(() => {
+    if (sessions.length && !selected) setSession(sessions[0].id);
+  }, [sessions, selected, setSession]);
 
   return (
     <aside className="sidebar">

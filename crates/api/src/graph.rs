@@ -53,6 +53,16 @@ pub async fn session_graph(
     Query(params): Query<GraphParams>,
 ) -> Result<Json<GraphResponse>, StatusCode> {
     let mode = params.mode.as_deref().unwrap_or("bipartite");
+    // Surface unknown session ids as 404 instead of an empty graph — consistent
+    // with sessions::detail and avoids hiding typos in the SPA.
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE id = ?1")
+        .bind(&id)
+        .fetch_optional(&state.store.reader)
+        .await
+        .map_err(map_db_err)?;
+    if exists.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     match mode {
         "bipartite" => bipartite(state, &id).await,
         "causal" => causal(state, &id).await,
@@ -163,15 +173,24 @@ async fn causal(state: Arc<AppState>, session_id: &str) -> Result<Json<GraphResp
         })
         .collect();
 
+    // Only emit edges whose parent is also in this session — cross-session
+    // parent links (rare but possible with sidechain transcripts) would
+    // dangle on the client and trigger a Cytoscape "nonexistent source"
+    // warning.
+    let in_session: std::collections::HashSet<&str> =
+        event_rows.iter().map(|(u, _, _, _)| u.as_str()).collect();
     let edges: Vec<Edge> = event_rows
         .iter()
         .filter_map(|(uuid, parent, ts, _)| {
-            parent.as_ref().map(|p| Edge {
-                source: p.clone(),
-                target: uuid.clone(),
-                ts: *ts,
-                label: "parent".into(),
-            })
+            parent
+                .as_ref()
+                .filter(|p| in_session.contains(p.as_str()))
+                .map(|p| Edge {
+                    source: p.clone(),
+                    target: uuid.clone(),
+                    ts: *ts,
+                    label: "parent".into(),
+                })
         })
         .collect();
 
