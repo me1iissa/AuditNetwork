@@ -81,19 +81,36 @@ async fn ingest_one(store: &Store, path: &Path, stats: &mut IngestStats) -> anyh
     .fetch_optional(&store.reader)
     .await?;
 
-    let (start_offset, prior_hash) = match &prior {
-        Some((h, b)) if (*b as u64) <= size => (*b as u64, Some(h.clone())),
-        _ => (0u64, None),
+    // Always hash the file first so we can detect rewrites that happen to
+    // land on the same byte count as a prior ingest (would otherwise look
+    // like a no-op).
+    let mut file = tokio::fs::File::open(path).await?;
+    let full_hash = file_sha256(&mut file).await?;
+
+    let prior_hash = prior.as_ref().map(|(h, _)| h.as_str());
+    let prior_bytes = prior.as_ref().map(|(_, b)| *b as u64).unwrap_or(0);
+
+    let rewrite_detected = matches!(prior_hash, Some(h) if h != full_hash) || prior_bytes > size;
+
+    let start_offset = if rewrite_detected {
+        tracing::info!(
+            "rewrite detected for {} (prior_bytes={prior_bytes}, size={size}, hash_changed={}); purging prior rows and re-ingesting from 0",
+            path.display(),
+            prior_hash.map(|h| h != full_hash).unwrap_or(false),
+        );
+        purge_source(store, &path_str).await?;
+        0u64
+    } else if prior_bytes <= size {
+        prior_bytes
+    } else {
+        0
     };
 
-    if start_offset == size {
-        // Nothing new.
+    if start_offset == size && !rewrite_detected {
+        // No new bytes and no rewrite — genuine no-op.
         return Ok(());
     }
 
-    let mut file = tokio::fs::File::open(path).await?;
-    // Full-file hash (cheap on these files; needed for provenance).
-    let full_hash = file_sha256(&mut file).await?;
     file.seek(SeekFrom::Start(start_offset)).await?;
     let mut reader = BufReader::new(file);
 
@@ -135,7 +152,7 @@ async fn ingest_one(store: &Store, path: &Path, stats: &mut IngestStats) -> anyh
             upsert_session(store, &parsed, &session_id, &full_hash).await?;
         }
 
-        write_event(
+        let event_inserted = write_event(
             store,
             &parsed,
             &session_id,
@@ -147,12 +164,17 @@ async fn ingest_one(store: &Store, path: &Path, stats: &mut IngestStats) -> anyh
         events_in_file += 1;
         stats.events_added += 1;
 
-        // Per-line specific projections.
+        // Per-line specific projections. These are themselves idempotent
+        // (INSERT OR IGNORE), so re-running them on a duplicate event is
+        // harmless. Token accumulation is NOT idempotent, however — gate
+        // it on whether this event is genuinely new.
         write_message_row(store, &parsed, &session_id).await?;
         let tcs_added = write_tool_calls(store, &parsed, &session_id).await?;
         stats.tool_calls_added += tcs_added;
-        write_tool_results(store, &parsed).await?;
-        accumulate_session_tokens(store, &parsed, &session_id).await?;
+        write_tool_results(store, &parsed, &session_id).await?;
+        if event_inserted {
+            accumulate_session_tokens(store, &parsed, &session_id).await?;
+        }
         write_ai_title(store, &parsed, &session_id).await?;
 
         // Touch session.ended_at on every event.
@@ -184,7 +206,7 @@ async fn ingest_one(store: &Store, path: &Path, stats: &mut IngestStats) -> anyh
     .execute(&store.writer)
     .await?;
 
-    if prior_hash.as_deref() != Some(full_hash.as_str()) || events_in_file > 0 {
+    if prior_hash != Some(full_hash.as_str()) || events_in_file > 0 {
         stats.files_ingested += 1;
     }
     Ok(())
@@ -237,6 +259,9 @@ async fn upsert_session(
     Ok(())
 }
 
+/// Returns `true` if this event was newly inserted (vs. a no-op on the
+/// uuid PK). Callers gate non-idempotent work like token accumulation
+/// on this signal.
 async fn write_event(
     store: &Store,
     p: &ParsedLine,
@@ -244,7 +269,7 @@ async fn write_event(
     source_path: &str,
     offset: u64,
     file_sha: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let uuid = match p.transcript.uuid.clone() {
         Some(u) => u,
         None => synthetic_uuid(source_path, offset),
@@ -257,7 +282,7 @@ async fn write_event(
     let kind = p.kind_str();
     let is_sidechain = p.transcript.is_sidechain.unwrap_or(false) as i32;
 
-    sqlx::query(
+    let res = sqlx::query(
         "INSERT OR IGNORE INTO events(uuid, parent_uuid, session_id, ts, kind, is_sidechain, agent_id, prompt_id, request_id, raw_json, source_path, source_offset, source_sha256)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )
@@ -276,6 +301,7 @@ async fn write_event(
     .bind(file_sha)
     .execute(&store.writer)
     .await?;
+    let inserted = res.rows_affected() > 0;
 
     for h in &hits {
         sqlx::query(
@@ -287,6 +313,77 @@ async fn write_event(
         .execute(&store.writer)
         .await?;
     }
+    Ok(inserted)
+}
+
+/// Delete all rows derived from a given source file, in FK-safe order.
+/// Called when we detect a rewrite (sha256 changed or file shrunk) so the
+/// new bytes can be ingested cleanly without orphaned offsets or stale
+/// tool_calls. Sessions and project-scoped artifacts are intentionally
+/// preserved — they may be referenced by other source files.
+async fn purge_source(store: &Store, source_path: &str) -> anyhow::Result<()> {
+    let mut tx = store.writer.begin().await?;
+
+    // Collect the set of event uuids and tool_call ids derived from this
+    // source so we can delete dependents before parents.
+    let event_uuids: Vec<String> =
+        sqlx::query_scalar("SELECT uuid FROM events WHERE source_path = ?1")
+            .bind(source_path)
+            .fetch_all(&mut *tx)
+            .await?;
+    if event_uuids.is_empty() {
+        // Nothing to purge; still drop the ingest_log row so the next
+        // ingest treats the file as fresh.
+        sqlx::query("DELETE FROM ingest_log WHERE source_path = ?1")
+            .bind(source_path)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    // SQLite has no `IN (?bind list)` for variable-length, so we route
+    // through a temp table to keep the SQL simple and the row count
+    // unbounded.
+    sqlx::query("CREATE TEMP TABLE IF NOT EXISTS _purge_uuids(uuid TEXT PRIMARY KEY)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM _purge_uuids")
+        .execute(&mut *tx)
+        .await?;
+    for u in &event_uuids {
+        sqlx::query("INSERT INTO _purge_uuids(uuid) VALUES (?1)")
+            .bind(u)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Children of tool_calls first.
+    for stmt in [
+        "DELETE FROM tool_artifact_edges WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM file_ops             WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM bash_commands        WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM web_fetches          WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM tool_results         WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM permission_events    WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "UPDATE subagent_runs SET parent_tool_call_id = NULL WHERE parent_tool_call_id IN (SELECT id FROM tool_calls WHERE event_uuid IN (SELECT uuid FROM _purge_uuids))",
+        "DELETE FROM tool_calls           WHERE event_uuid IN (SELECT uuid FROM _purge_uuids)",
+        "DELETE FROM messages             WHERE event_uuid IN (SELECT uuid FROM _purge_uuids)",
+        "DELETE FROM redactions           WHERE event_uuid IN (SELECT uuid FROM _purge_uuids)",
+        "DELETE FROM events               WHERE uuid       IN (SELECT uuid FROM _purge_uuids)",
+        "DELETE FROM ingest_log           WHERE source_path = ?1",
+    ] {
+        let mut q = sqlx::query(stmt);
+        if stmt.contains("source_path") {
+            q = q.bind(source_path);
+        }
+        q.execute(&mut *tx).await?;
+    }
+
+    sqlx::query("DROP TABLE _purge_uuids")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -470,13 +567,18 @@ async fn upsert_artifact(store: &Store, a: &ArtifactRef, ts_ms: i64) -> anyhow::
     Ok(id)
 }
 
-async fn write_tool_results(store: &Store, p: &ParsedLine) -> anyhow::Result<()> {
+async fn write_tool_results(store: &Store, p: &ParsedLine, session_id: &str) -> anyhow::Result<()> {
     for (tool_use_id, is_error, content) in tool_results(p) {
-        let tc_id: Option<i64> =
-            sqlx::query_scalar("SELECT id FROM tool_calls WHERE tool_use_id = ?1")
-                .bind(&tool_use_id)
-                .fetch_optional(&store.reader)
-                .await?;
+        // Session-scoped lookup: the same tool_use_id can legitimately
+        // appear in multiple sessions (UNIQUE is on (tool_use_id, session_id)),
+        // so attaching the result by id alone could land it on the wrong row.
+        let tc_id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM tool_calls WHERE tool_use_id = ?1 AND session_id = ?2",
+        )
+        .bind(&tool_use_id)
+        .bind(session_id)
+        .fetch_optional(&store.reader)
+        .await?;
         let Some(tc_id) = tc_id else { continue };
 
         let started_at: Option<i64> = sqlx::query_scalar("SELECT ts FROM tool_calls WHERE id = ?1")
@@ -551,4 +653,214 @@ async fn write_ai_title(store: &Store, p: &ParsedLine, session_id: &str) -> anyh
 #[allow(dead_code)]
 fn parse_ts_ms_or_zero(s: Option<&str>) -> i64 {
     s.and_then(parse_ts_to_ms).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn temp_db() -> (Store, tempdir::TempPath) {
+        let tmp = tempdir::TempPath::new();
+        let store = Store::open(&tmp.path).await.unwrap();
+        (store, tmp)
+    }
+
+    fn assistant_line(uuid: &str, session_id: &str, ts: &str, tool_use_id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"{ts}","sessionId":"{session_id}","message":{{"role":"assistant","model":"claude-test","content":[{{"type":"tool_use","id":"{tool_use_id}","name":"Bash","input":{{"command":"echo hi"}}}}],"usage":{{"input_tokens":1,"output_tokens":2}}}}}}"#
+        )
+    }
+
+    fn tool_result_line(
+        uuid: &str,
+        parent_uuid: &str,
+        session_id: &str,
+        ts: &str,
+        tool_use_id: &str,
+    ) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":"{parent_uuid}","timestamp":"{ts}","sessionId":"{session_id}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{tool_use_id}","content":"ok","is_error":false}}]}}}}"#
+        )
+    }
+
+    async fn write_jsonl(path: &Path, lines: &[String]) {
+        let mut f = tokio::fs::File::create(path).await.unwrap();
+        for l in lines {
+            f.write_all(l.as_bytes()).await.unwrap();
+            f.write_all(b"\n").await.unwrap();
+        }
+        f.sync_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn idempotent_reingest_does_not_double_count_tokens() {
+        let (store, _db) = temp_db().await;
+        let tmp = tempdir::TempPath::new();
+        let p = tmp.path.with_extension("jsonl");
+        write_jsonl(
+            &p,
+            &[assistant_line("u1", "s1", "2026-05-16T00:00:00Z", "t1")],
+        )
+        .await;
+
+        let _ = ingest_path(&store, &p).await.unwrap();
+        let _ = ingest_path(&store, &p).await.unwrap();
+
+        let totals: (i64, i64) = sqlx::query_as(
+            "SELECT total_input_tokens, total_output_tokens FROM sessions WHERE id='s1'",
+        )
+        .fetch_one(&store.reader)
+        .await
+        .unwrap();
+        assert_eq!(totals, (1, 2));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn rewrite_with_same_size_purges_and_reingests() {
+        let (store, _db) = temp_db().await;
+        let tmp = tempdir::TempPath::new();
+        let p = tmp.path.with_extension("jsonl");
+
+        // First ingest: one event in session s1.
+        write_jsonl(
+            &p,
+            &[assistant_line("aaaa", "s1", "2026-05-16T00:00:00Z", "t1")],
+        )
+        .await;
+        ingest_path(&store, &p).await.unwrap();
+
+        // Same byte count, different content (different uuid + session).
+        // The reviewer's bug: without sha-first detection this is a no-op.
+        let line_old = assistant_line("aaaa", "s1", "2026-05-16T00:00:00Z", "t1");
+        let line_new = assistant_line("bbbb", "s2", "2026-05-16T00:00:00Z", "t2");
+        assert_eq!(line_old.len(), line_new.len(), "fixture must match length");
+        write_jsonl(&p, &[line_new]).await;
+        ingest_path(&store, &p).await.unwrap();
+
+        // The old event must be gone, the new one present.
+        let n_aaaa: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE uuid='aaaa'")
+            .fetch_one(&store.reader)
+            .await
+            .unwrap();
+        let n_bbbb: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE uuid='bbbb'")
+            .fetch_one(&store.reader)
+            .await
+            .unwrap();
+        assert_eq!(n_aaaa, 0, "old event should be purged");
+        assert_eq!(n_bbbb, 1, "new event should be ingested");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn truncation_to_smaller_size_resets_offset() {
+        let (store, _db) = temp_db().await;
+        let tmp = tempdir::TempPath::new();
+        let p = tmp.path.with_extension("jsonl");
+
+        // First: two events.
+        write_jsonl(
+            &p,
+            &[
+                assistant_line("u1", "s1", "2026-05-16T00:00:00Z", "t1"),
+                assistant_line("u2", "s1", "2026-05-16T00:00:01Z", "t2"),
+            ],
+        )
+        .await;
+        ingest_path(&store, &p).await.unwrap();
+
+        // Truncate-and-rewrite with one event.
+        write_jsonl(
+            &p,
+            &[assistant_line("u3", "s1", "2026-05-16T00:00:02Z", "t3")],
+        )
+        .await;
+        ingest_path(&store, &p).await.unwrap();
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE source_path = ?1")
+            .bind(p.to_string_lossy().to_string())
+            .fetch_one(&store.reader)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "old events should be purged after truncation");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn tool_result_lookup_is_session_scoped() {
+        let (store, _db) = temp_db().await;
+        let tmp_a = tempdir::TempPath::new();
+        let tmp_b = tempdir::TempPath::new();
+        let pa = tmp_a.path.with_extension("jsonl");
+        let pb = tmp_b.path.with_extension("jsonl");
+
+        // Two sessions, same tool_use_id collides on different timestamps.
+        // Session A: tool_use at t=0, tool_result at t=10 (10ms duration).
+        write_jsonl(
+            &pa,
+            &[
+                assistant_line("a1", "sA", "2026-05-16T00:00:00.000Z", "shared"),
+                tool_result_line("a2", "a1", "sA", "2026-05-16T00:00:00.010Z", "shared"),
+            ],
+        )
+        .await;
+        // Session B: tool_use at t=0, tool_result at t=999 (999ms duration).
+        write_jsonl(
+            &pb,
+            &[
+                assistant_line("b1", "sB", "2026-05-16T00:00:00.000Z", "shared"),
+                tool_result_line("b2", "b1", "sB", "2026-05-16T00:00:00.999Z", "shared"),
+            ],
+        )
+        .await;
+        ingest_path(&store, &pa).await.unwrap();
+        ingest_path(&store, &pb).await.unwrap();
+
+        let dur_a: Option<i64> = sqlx::query_scalar(
+            "SELECT duration_ms FROM tool_calls WHERE session_id='sA' AND tool_use_id='shared'",
+        )
+        .fetch_one(&store.reader)
+        .await
+        .unwrap();
+        let dur_b: Option<i64> = sqlx::query_scalar(
+            "SELECT duration_ms FROM tool_calls WHERE session_id='sB' AND tool_use_id='shared'",
+        )
+        .fetch_one(&store.reader)
+        .await
+        .unwrap();
+        assert_eq!(dur_a, Some(10), "session A tool_result must attach to A");
+        assert_eq!(dur_b, Some(999), "session B tool_result must attach to B");
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
+    }
+
+    /// Tiny stand-in for the `tempfile` crate so we avoid a new dependency.
+    /// Not robust — sufficient for these tests.
+    mod tempdir {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        pub struct TempPath {
+            pub path: PathBuf,
+        }
+        impl TempPath {
+            pub fn new() -> Self {
+                let n = SEQ.fetch_add(1, Ordering::SeqCst);
+                let pid = std::process::id();
+                let path = std::env::temp_dir().join(format!("an_test_{pid}_{n}"));
+                Self { path }
+            }
+        }
+        impl Drop for TempPath {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.path);
+                // Best-effort cleanup of sqlite sidecars and jsonl alias.
+                for ext in ["db-wal", "db-shm", "jsonl", "jsonl-wal", "jsonl-shm"] {
+                    let _ = std::fs::remove_file(self.path.with_extension(ext));
+                }
+            }
+        }
+    }
 }

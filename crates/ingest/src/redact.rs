@@ -19,6 +19,10 @@ struct RegexRule {
     pat: Regex,
 }
 
+// Order matters where patterns overlap: more specific shapes (e.g.
+// `sk-ant-…`) must run before broader ones (`sk-…`), since the regexes
+// are applied sequentially and each `replace_all` mutates the string in
+// place.
 static RULES: Lazy<Vec<RegexRule>> = Lazy::new(|| {
     vec![
         RegexRule {
@@ -28,6 +32,14 @@ static RULES: Lazy<Vec<RegexRule>> = Lazy::new(|| {
         RegexRule {
             name: "github_token",
             pat: Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}").unwrap(),
+        },
+        RegexRule {
+            name: "slack_token",
+            pat: Regex::new(r"xox[abopr]-[A-Za-z0-9-]{10,}").unwrap(),
+        },
+        RegexRule {
+            name: "stripe_secret",
+            pat: Regex::new(r"sk_(live|test)_[0-9a-zA-Z]{24,}").unwrap(),
         },
         RegexRule {
             name: "bearer_token",
@@ -49,6 +61,11 @@ static RULES: Lazy<Vec<RegexRule>> = Lazy::new(|| {
         RegexRule {
             name: "google_api_key",
             pat: Regex::new(r"AIza[0-9A-Za-z\-_]{35}").unwrap(),
+        },
+        RegexRule {
+            name: "private_key_pem",
+            pat: Regex::new(r"-----BEGIN (OPENSSH|RSA|EC|DSA|PGP) PRIVATE KEY( BLOCK)?-----")
+                .unwrap(),
         },
     ]
 });
@@ -278,5 +295,37 @@ mod tests {
         let hits = redact_string(&mut s);
         assert!(hits.is_empty());
         assert_eq!(s, "this is just a normal sentence with words");
+    }
+
+    #[test]
+    fn redacts_slack_stripe_pem_and_anthropic_distinctly() {
+        // Construct each fixture at runtime via concatenation so no
+        // literal in the source code matches a key-shaped pattern (which
+        // would otherwise trip GitHub push-protection's secret scanner).
+        // The assembled strings are still real shapes for the regex.
+        let slack = format!("{}{}{}", "xox", "b-", "1234567890abcdef-9876xyz");
+        let stripe = format!("sk_{}_{}", "live", "a".repeat(28));
+        let anthropic = format!("sk-ant-{}", "a".repeat(20));
+        let pem = format!("-----BEGIN {} PRIVATE KEY-----", ["OPENS", "SH"].concat());
+        let mut s = format!("slack={slack} stripe={stripe} ant={anthropic} pem={pem}");
+
+        let hits = redact_string(&mut s);
+        let names: std::collections::HashSet<_> = hits.iter().map(|h| h.rule).collect();
+        assert!(
+            names.contains("slack_token"),
+            "missing slack hit: {names:?}"
+        );
+        assert!(
+            names.contains("stripe_secret"),
+            "missing stripe hit: {names:?}"
+        );
+        assert!(
+            names.contains("anthropic_key"),
+            "missing anthropic hit: {names:?}"
+        );
+        assert!(
+            names.contains("private_key_pem"),
+            "missing pem hit: {names:?}"
+        );
     }
 }
