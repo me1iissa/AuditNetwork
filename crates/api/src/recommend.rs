@@ -38,22 +38,37 @@ pub struct Recommendation {
 
 /// Compute every rule against the warehouse for a single session and
 /// upsert into the `recommendations` table. Returns the rows it wrote.
+///
+/// Idempotency: replaces every non-dismissed row for this session in a
+/// single transaction so re-running doesn't double-count and a panicking
+/// detector never leaves the session in an empty state. Dismissals
+/// (`dismissed_at IS NOT NULL`) are preserved across runs.
 pub async fn analyse_session(
     store: &Store,
     session_id: &str,
 ) -> anyhow::Result<Vec<Recommendation>> {
+    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
     let mut out = Vec::new();
     out.extend(reread_unchanged_file(store, session_id).await?);
     out.extend(redundant_bash(store, session_id).await?);
     out.extend(redundant_webfetch(store, session_id).await?);
     out.extend(pattern_repetition(store, session_id).await?);
-    out.extend(cross_session_webfetch_dupe(store, session_id).await?);
-    persist(store, &out).await?;
+    out.extend(cross_session_webfetch_dupe(store, session_id, now_ms).await?);
+    persist(store, session_id, &out, now_ms).await?;
     Ok(out)
 }
 
-async fn persist(store: &Store, recs: &[Recommendation]) -> anyhow::Result<()> {
-    let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+async fn persist(
+    store: &Store,
+    session_id: &str,
+    recs: &[Recommendation],
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let mut tx = store.writer.begin().await?;
+    sqlx::query("DELETE FROM recommendations WHERE session_id = ?1 AND dismissed_at IS NULL")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
     for r in recs {
         sqlx::query(
             "INSERT INTO recommendations(session_id, rule_id, severity, summary, evidence_json, estimated_save, created_at)
@@ -66,37 +81,48 @@ async fn persist(store: &Store, recs: &[Recommendation]) -> anyhow::Result<()> {
         .bind(serde_json::to_string(&r.evidence_json)?)
         .bind(r.estimated_save.as_deref())
         .bind(now_ms)
-        .execute(&store.writer)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
-/// Rule 1 — a Read whose hash equals the previous touch's hash.
+/// Rule 1 — a Read of a file that hasn't changed since the prior touch.
+///
+/// Two shapes are caught:
+/// - The current Read's `content_hash_after` equals the prior op's
+///   `content_hash_after` (works when Reads populate `content_hash_after`).
+/// - The current Read's `content_hash_before` equals the prior op's
+///   `content_hash_after` (the more common shape — works when Reads
+///   only record the pre-read state).
+///
+/// Either signal means the bytes Claude just read are bytes we already
+/// have in this session; the Read tool call is redundant.
 async fn reread_unchanged_file(
     store: &Store,
     session_id: &str,
 ) -> anyhow::Result<Vec<Recommendation>> {
-    // Window over file_ops within the session; flag when current op is
-    // a 'read' AND the prior op (any kind) on the same artifact has a
-    // matching content hash.
-    let rows: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
         r#"
         WITH ord AS (
             SELECT fo.tool_call_id, fo.artifact_id, fo.op,
+                   fo.content_hash_before,
                    fo.content_hash_after,
-                   LAG(fo.content_hash_after) OVER (PARTITION BY fo.artifact_id ORDER BY tc.ts) AS prev_hash,
+                   LAG(fo.content_hash_after) OVER (PARTITION BY fo.artifact_id ORDER BY tc.ts) AS prev_after,
                    fo.file_path
             FROM file_ops fo
             JOIN tool_calls tc ON tc.id = fo.tool_call_id
             WHERE tc.session_id = ?1
         )
-        SELECT tool_call_id, file_path, op, prev_hash
+        SELECT tool_call_id, file_path, prev_after
         FROM ord
         WHERE op = 'read'
-          AND content_hash_after IS NOT NULL
-          AND prev_hash IS NOT NULL
-          AND content_hash_after = prev_hash
+          AND prev_after IS NOT NULL
+          AND (
+               (content_hash_after  IS NOT NULL AND content_hash_after  = prev_after)
+            OR (content_hash_before IS NOT NULL AND content_hash_before = prev_after)
+          )
         "#,
     )
     .bind(session_id)
@@ -105,7 +131,7 @@ async fn reread_unchanged_file(
 
     Ok(rows
         .into_iter()
-        .map(|(tc_id, path, _op, _prev_hash)| Recommendation {
+        .map(|(tc_id, path, _prev)| Recommendation {
             session_id: session_id.to_string(),
             rule_id: "reread_unchanged_file",
             severity: "opportunity",
@@ -214,12 +240,18 @@ async fn pattern_repetition(
         .collect())
 }
 
-/// Rule 5 — same URL fetched across ≥ 2 sessions within 7 days.
+/// Rule 5 — same URL fetched across ≥ 2 sessions within 7 days of now.
+///
+/// The window is anchored on `now_ms` (the detector run time), not on
+/// the analysed session's max ts — otherwise ingesting old sessions
+/// would silently miss recent project-wide duplicates of URLs they hit.
 async fn cross_session_webfetch_dupe(
     store: &Store,
     session_id: &str,
+    now_ms: i64,
 ) -> anyhow::Result<Vec<Recommendation>> {
     let seven_days_ms: i64 = 7 * 24 * 3600 * 1000;
+    let window_start = now_ms - seven_days_ms;
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         r#"
         SELECT wf.url_hash,
@@ -227,7 +259,7 @@ async fn cross_session_webfetch_dupe(
                COUNT(DISTINCT tc.session_id) AS sessions
         FROM web_fetches wf
         JOIN tool_calls tc ON tc.id = wf.tool_call_id
-        WHERE tc.ts >= (SELECT MAX(ts) FROM tool_calls WHERE session_id = ?1) - ?2
+        WHERE tc.ts >= ?2
           AND wf.url_hash IN (
             SELECT wf2.url_hash
             FROM web_fetches wf2
@@ -239,7 +271,7 @@ async fn cross_session_webfetch_dupe(
         "#,
     )
     .bind(session_id)
-    .bind(seven_days_ms)
+    .bind(window_start)
     .fetch_all(&store.reader)
     .await?;
 
