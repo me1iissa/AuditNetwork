@@ -9,6 +9,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Pool, Sqlite};
 
 const SCHEMA_SQL: &str = include_str!("../../../migrations/0001_init.sql");
+const VIEWS_SQL: &str = include_str!("../../../migrations/0002_views.sql");
 
 #[derive(Clone)]
 pub struct Store {
@@ -48,10 +49,12 @@ impl Store {
     }
 
     async fn run_migrations(&self) -> anyhow::Result<()> {
-        // Idempotent — every CREATE uses IF NOT EXISTS.
+        // Idempotent — every CREATE uses IF NOT EXISTS, every view uses
+        // DROP+CREATE so schema bumps re-apply cleanly without manual
+        // migration steps.
         sqlx::raw_sql(SCHEMA_SQL).execute(&self.writer).await?;
-        // Pin schema version after migration.
-        sqlx::query("PRAGMA user_version = 1")
+        sqlx::raw_sql(VIEWS_SQL).execute(&self.writer).await?;
+        sqlx::query("PRAGMA user_version = 2")
             .execute(&self.writer)
             .await?;
         Ok(())

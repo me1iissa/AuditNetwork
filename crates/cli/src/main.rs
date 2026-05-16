@@ -46,6 +46,11 @@ enum Cmd {
         #[arg(long, env = "AN_DEV_CORS")]
         dev_cors: bool,
     },
+    /// Run the optimisation detectors against one session id and persist
+    /// any findings into the `recommendations` table.
+    Recommend { session_id: String },
+    /// Run every detector against every session in the warehouse.
+    RecommendAll,
 }
 
 #[tokio::main]
@@ -89,6 +94,25 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Serve { bind, dev_cors } => {
             serve(store, bind, dev_cors).await?;
+        }
+        Cmd::Recommend { session_id } => {
+            let recs = api::recommend::analyse_session(&store, &session_id).await?;
+            println!("session={session_id} recommendations={}", recs.len());
+            for r in recs {
+                println!("  [{}] {}", r.rule_id, r.summary);
+            }
+        }
+        Cmd::RecommendAll => {
+            let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions")
+                .fetch_all(&store.reader)
+                .await?;
+            let mut total = 0usize;
+            for id in &ids {
+                let recs = api::recommend::analyse_session(&store, id).await?;
+                total += recs.len();
+                println!("session={id} recommendations={}", recs.len());
+            }
+            println!("total={total} sessions={}", ids.len());
         }
     }
     Ok(())

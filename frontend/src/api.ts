@@ -85,6 +85,26 @@ export type ArtifactDetail = {
   touches: ArtifactTouch[];
 };
 
+export type Recommendation = {
+  id: number;
+  session_id: string;
+  rule_id: string;
+  severity: string;
+  summary: string;
+  evidence_json: string;
+  estimated_save: string | null;
+  created_at: number;
+  dismissed_at: number | null;
+};
+
+export type QueryResponse = {
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  truncated: boolean;
+  duration_ms: number;
+};
+
 export const api = {
   listSessions: () => getJson<SessionSummary[]>("/api/sessions"),
   sessionGraph: (id: string, mode: GraphMode) =>
@@ -94,4 +114,18 @@ export const api = {
     getJson<ArtifactDetail>(
       `/api/artifacts/${id}?session_id=${encodeURIComponent(sessionId)}`,
     ),
+  recommendations: (sessionId: string) =>
+    getJson<Recommendation[]>(`/api/sessions/${sessionId}/recommendations`),
+  query: async (sql: string): Promise<QueryResponse> => {
+    const res = await fetch("/api/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sql }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body}`);
+    }
+    return (await res.json()) as QueryResponse;
+  },
 };

@@ -241,3 +241,45 @@ body,
   border-bottom: 1px solid #5a2020;
   font-size: 12px;
 }
+
+.recs h3 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.recs ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recs li {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+.recs .rec-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.recs .rec-rule {
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.recs .rec-save {
+  font-size: 11px;
+  color: var(--muted);
+}
+.recs .rec-summary {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+}
+.recs.empty p code {
+  background: #0a0d12;
+  padding: 1px 4px;
+  border-radius: 2px;
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type ArtifactDetail, type ToolCallDetail } from "../api";
 import { useUi } from "../store";
+import { Recommendations } from "./Recommendations";
 
 type Detail =
   | { kind: "tool_call"; data: ToolCallDetail }
@@ -40,9 +41,10 @@ export function DetailPanel() {
   }, [selected, session]);
 
   if (!selected) {
+    // No node selected → surface the optimisation panel for this session.
     return (
       <aside className="detail-panel">
-        <div className="muted">Click a node to inspect it.</div>
+        <Recommendations />
       </aside>
     );
   }
