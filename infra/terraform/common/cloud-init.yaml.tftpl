@@ -1,0 +1,92 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - ufw
+
+users:
+  - name: deploy
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, docker]
+    shell: /bin/bash
+    ssh_authorized_keys:
+%{ for key in ssh_authorized_keys ~}
+      - ${key}
+%{ endfor ~}
+
+write_files:
+  - path: /etc/auditnetwork/docker-compose.yml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      services:
+        auditnetwork:
+          image: ${container_image}
+          restart: unless-stopped
+          ports:
+            - "127.0.0.1:8080:8080"
+          volumes:
+            - /var/lib/auditnetwork:/data
+          environment:
+            - AN_BIND=0.0.0.0:8080
+            - AN_DB=/data/audit.db
+            - RUST_LOG=info
+          healthcheck:
+            test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/healthz || exit 1"]
+            interval: 30s
+            timeout: 3s
+            retries: 3
+
+  - path: /etc/caddy/Caddyfile
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ${domain} {
+          encode zstd gzip
+          reverse_proxy 127.0.0.1:8080
+      }
+
+  - path: /etc/systemd/system/auditnetwork.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=AuditNetwork
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      WorkingDirectory=/etc/auditnetwork
+      ExecStartPre=-/usr/bin/docker compose pull
+      ExecStart=/usr/bin/docker compose up
+      ExecStop=/usr/bin/docker compose down
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - install -d -o root -g root -m 0755 /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  - chmod a+r /etc/apt/keyrings/docker.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /etc/apt/keyrings/caddy.gpg
+  - curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | tee /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin caddy
+  - install -d -o 10001 -g 10001 -m 0750 /var/lib/auditnetwork
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow OpenSSH
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+  - systemctl daemon-reload
+  - systemctl enable --now auditnetwork.service
+  - systemctl reload caddy

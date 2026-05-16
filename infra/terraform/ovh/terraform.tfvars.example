@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and fill in. Do NOT commit terraform.tfvars.
+# Auth via env vars:
+#   export OVH_ENDPOINT=ovh-eu
+#   export OVH_APPLICATION_KEY=...
+#   export OVH_APPLICATION_SECRET=...
+#   export OVH_CONSUMER_KEY=...
+# Generate creds at https://eu.api.ovh.com/createToken
+
+ovh_service_name    = "00000000000000000000000000000000"  # Public Cloud project ID
+domain              = "audit.example.com"
+ssh_authorized_keys = [
+  # "ssh-ed25519 AAAA... user@host",
+]
+# region = "GRA11"  # GRA11 / SBG5 / BHS5 / WAW1
+# flavor = "b3-8"   # d2-2 (€5) / b3-8 (€20) — pick by sizing
