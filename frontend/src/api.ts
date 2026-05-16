@@ -49,8 +49,49 @@ async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+export type ToolCallDetail = {
+  id: number;
+  event_uuid: string;
+  session_id: string;
+  ts: number;
+  tool_use_id: string;
+  tool_name: string;
+  input_json: string;
+  duration_ms: number | null;
+  success: number | null;
+  error_kind: string | null;
+  is_sidechain: number;
+  agent_id: string | null;
+  result_output_bytes: number | null;
+  result_is_error: number | null;
+  result_error_text: string | null;
+  artifact_count: number;
+};
+
+export type ArtifactTouch = {
+  tool_call_id: number;
+  ts: number;
+  tool_name: string;
+  access_kind: string;
+};
+
+export type ArtifactDetail = {
+  id: number;
+  kind: string;
+  canonical_key: string;
+  display: string;
+  first_seen_ts: number;
+  last_seen_ts: number;
+  touches: ArtifactTouch[];
+};
+
 export const api = {
   listSessions: () => getJson<SessionSummary[]>("/api/sessions"),
   sessionGraph: (id: string, mode: GraphMode) =>
     getJson<GraphResponse>(`/api/sessions/${id}/graph?mode=${mode}`),
+  toolCall: (id: number) => getJson<ToolCallDetail>(`/api/tool_calls/${id}`),
+  artifact: (id: number, sessionId: string) =>
+    getJson<ArtifactDetail>(
+      `/api/artifacts/${id}?session_id=${encodeURIComponent(sessionId)}`,
+    ),
 };

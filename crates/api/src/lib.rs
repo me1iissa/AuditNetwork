@@ -1,13 +1,17 @@
 //! HTTP API for AuditNetwork. Read-only over the SQLite warehouse.
 //!
-//! Endpoints (M2):
-//! - `GET  /healthz`               → liveness probe
-//! - `GET  /readyz`                → readiness (DB SELECT 1)
-//! - `GET  /api/sessions`          → list sessions with summary metrics
-//! - `GET  /api/sessions/:id`      → session detail
-//! - `GET  /api/sessions/:id/graph?mode=bipartite|causal`
+//! Endpoints:
+//! - `GET  /healthz`                         → liveness probe
+//! - `GET  /readyz`                          → readiness (DB SELECT 1)
+//! - `GET  /api/sessions`                    → list sessions with summary metrics
+//! - `GET  /api/sessions/:id`                → session detail
+//! - `GET  /api/sessions/:id/graph?mode=…`   → bipartite or causal graph
+//! - `GET  /api/tool_calls/:id`              → tool_call detail for the panel (M3)
+//! - `GET  /api/artifacts/:id?session_id=…`  → artifact detail + per-session touches (M3)
+//! - `GET  /ws`                              → WebSocket replay control + cursor stream (M3)
 //!
-//! M3 will add WebSocket replay; M4 will add the SQL query playground.
+//! M4 will add the SQL query playground; M5 will add live tailing on the
+//! same `/ws` endpoint.
 
 use std::sync::Arc;
 
@@ -15,9 +19,11 @@ use axum::{routing::get, Router};
 use store::Store;
 use tower_http::cors::CorsLayer;
 
+mod detail;
 mod graph;
 mod health;
 mod sessions;
+mod ws;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,7 +45,10 @@ pub fn router(store: Store, dev_cors: bool) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/api/sessions", get(sessions::list))
         .route("/api/sessions/:id", get(sessions::detail))
-        .route("/api/sessions/:id/graph", get(graph::session_graph));
+        .route("/api/sessions/:id/graph", get(graph::session_graph))
+        .route("/api/tool_calls/:id", get(detail::tool_call))
+        .route("/api/artifacts/:id", get(detail::artifact))
+        .route("/ws", get(ws::ws_handler));
     let r = if dev_cors {
         tracing::warn!(
             "permissive CORS enabled — only safe behind 127.0.0.1 or a trusted reverse proxy"
