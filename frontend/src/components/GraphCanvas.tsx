@@ -178,6 +178,11 @@ export function GraphCanvas() {
 
   // Cursor → opacity: any element with ts > cursor gets `.faded`.
   // When cursor is null OR before any bounds exist, show everything.
+  //
+  // `stats` is in the deps deliberately: it changes once per new graph
+  // load (session switch / mode toggle) and the new Cytoscape `cy`
+  // instance hasn't been seen by the previous effect run, so we need to
+  // re-apply the fade pass to the fresh element set.
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;

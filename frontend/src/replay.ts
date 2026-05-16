@@ -36,9 +36,16 @@ export function openReplay(sessionId: string) {
   const sock = new WebSocket(wsUrl());
   ws = sock;
   sock.onopen = () => {
-    send({ op: "replay_open", session_id: sessionId });
+    // Gate on identity so a late `onopen` from a stale socket doesn't
+    // open replay for the wrong session.
+    if (ws === sock) send({ op: "replay_open", session_id: sessionId });
   };
   sock.onmessage = (ev) => {
+    // If we've already moved on to another session, ignore late messages
+    // from this socket — without this, a stale `cursor` or `replay_bounds`
+    // can clobber the active session's UI for one tick after a rapid
+    // session switch.
+    if (ws !== sock) return;
     let msg: ServerMsg;
     try {
       msg = JSON.parse(ev.data);
@@ -64,7 +71,7 @@ export function openReplay(sessionId: string) {
     if (ws === sock) ws = null;
   };
   sock.onerror = () => {
-    useUi.setState({ replayError: "websocket error" });
+    if (ws === sock) useUi.setState({ replayError: "websocket error" });
   };
 }
 
