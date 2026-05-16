@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/model",
+    "crates/ingest",
+    "crates/store",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/me1iissa/auditnetwork"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate", "time"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+regex = "1"
+once_cell = "1"
+dirs = "5"
+
+model = { path = "crates/model" }
+ingest = { path = "crates/ingest" }
+store = { path = "crates/store" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
